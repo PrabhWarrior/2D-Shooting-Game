@@ -2,9 +2,13 @@
   height: 100vh;
 }
 
+body {
+  overflow: hidden;
+}
+
 canvas {
+  display: block;
   background-color: rgb(49, 49, 49);
-  max-width: 100%;
   cursor: crosshair;
 }
 

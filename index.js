@@ -1,93 +1,101 @@
 // Basic Environment Setup
 const canvas = document.createElement("canvas");
 document.querySelector(".myGame").appendChild(canvas);
-
-// It will take over the while width and height of the page
-canvas.width = innerWidth;
-canvas.height = innerHeight;
 const context = canvas.getContext("2d");
 
-let difficulty = 2;
 const form = document.querySelector("form");
 const scoreBoard = document.querySelector(".scoreBoard");
 
-// Basic Functions
+const WEAPON_SPEED = 7;
+const DIFFICULTIES = {
+  Easy: { spawnRate: 2000, speed: 2 },
+  Medium: { spawnRate: 1400, speed: 3 },
+  Hard: { spawnRate: 1000, speed: 3.5 },
+  Insane: { spawnRate: 700, speed: 4.5 },
+};
 
-// Event Listener for Difficulty fomr
-document.querySelector("input").addEventListener("click", (e) => {
-  e.preventDefault(); // prevent from reloading the page
+let difficulty = DIFFICULTIES.Easy.speed;
+let spawnTimer = null;
+let animationId = null;
+let score = 0;
 
-  // Hiding the form
-  form.style.display = "none";
-  // Showing the scoreBoard
-  scoreBoard.style.display = "block";
+// ------------------------------------------ Sound Effects ------------------------------------------
+// Synthesized with the Web Audio API, so no audio files are needed
+let audioCtx = null;
 
-  // Getting difficulty selected by user
-  const userValue = document.getElementById("difficulty").value;
-  switch (userValue) {
-    case "Easy":
-      setInterval(spawnEnemy, 2000);
-      return (difficulty = 2);
-      break;
+// Browsers only allow audio after a user gesture, so this is called from the Play button
+const initAudio = () => {
+  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  if (audioCtx.state === "suspended") audioCtx.resume();
+};
 
-    case "Medium":
-      setInterval(spawnEnemy, 1400);
-      return (difficulty = 3);
-      break;
+// Plays a tone that slides from startFreq to endFreq and fades out
+const playTone = (startFreq, endFreq, duration, type = "sine", volume = 0.2) => {
+  if (!audioCtx) return;
+  const now = audioCtx.currentTime;
+  const osc = audioCtx.createOscillator();
+  const gain = audioCtx.createGain();
 
-    case "Hard":
-      setInterval(spawnEnemy, 1000);
-      return (difficulty = 3.5);
-      break;
+  osc.type = type;
+  osc.frequency.setValueAtTime(startFreq, now);
+  osc.frequency.exponentialRampToValueAtTime(endFreq, now + duration);
+  gain.gain.setValueAtTime(volume, now);
+  gain.gain.exponentialRampToValueAtTime(0.001, now + duration);
 
-    case "Insane":
-      setInterval(spawnEnemy, 700);
-      return (difficulty = 4.5);
-      break;
+  osc.connect(gain).connect(audioCtx.destination);
+  osc.start(now);
+  osc.stop(now + duration);
+};
 
-    default:
-      setInterval(spawnEnemy, 2000);
-      return (difficulty = 2);
-      break;
-  }
-});
+// Short burst of white noise for explosions
+const playNoise = (duration, volume = 0.3) => {
+  if (!audioCtx) return;
+  const now = audioCtx.currentTime;
+  const buffer = audioCtx.createBuffer(1, audioCtx.sampleRate * duration, audioCtx.sampleRate);
+  const data = buffer.getChannelData(0);
+  for (let i = 0; i < data.length; i++) data[i] = Math.random() * 2 - 1;
+
+  const source = audioCtx.createBufferSource();
+  const gain = audioCtx.createGain();
+  source.buffer = buffer;
+  gain.gain.setValueAtTime(volume, now);
+  gain.gain.exponentialRampToValueAtTime(0.001, now + duration);
+
+  source.connect(gain).connect(audioCtx.destination);
+  source.start(now);
+};
+
+const sounds = {
+  shoot: () => playTone(880, 220, 0.12, "square", 0.08),
+  hit: () => playTone(400, 150, 0.1, "triangle", 0.2),
+  destroy: () => {
+    playNoise(0.25, 0.25);
+    playTone(200, 40, 0.3, "sawtooth", 0.12);
+  },
+  gameOver: () => {
+    playTone(440, 55, 1.2, "sawtooth", 0.2);
+    playNoise(0.6, 0.3);
+  },
+};
+
+// Player always sits at the center of the canvas
+const playerPosition = { x: 0, y: 0 };
+
+// Canvas takes over the whole page and stays in sync with window size
+const resizeCanvas = () => {
+  canvas.width = innerWidth;
+  canvas.height = innerHeight;
+  playerPosition.x = canvas.width / 2;
+  playerPosition.y = canvas.height / 2;
+};
+resizeCanvas();
+addEventListener("resize", resizeCanvas);
 
 // ------------------------- Creating Player, Enemy, Weapon, Etc Classes--------------------------------
 
-// Setting player position to center
-const playerPosition = {
-  x: canvas.width / 2,
-  y: canvas.height / 2,
-};
-
-// Creating Player Class
-class Player {
-  constructor(x, y, radius, color) {
-    this.x = x;
-    this.y = y;
-    this.radius = radius;
-    this.color = color;
-  }
-
-  draw() {
-    context.beginPath();
-    context.arc(
-      this.x,
-      this.y,
-      this.radius,
-      (Math.PI / 180) * 0,
-      (Math.PI / 180) * 360,
-      false
-    );
-    context.fillStyle = this.color;
-
-    context.fill();
-  }
-}
-
-// Creating Weapon Class
-class Weapon {
-  constructor(x, y, radius, color, velocity) {
+// Base class for everything drawn as a filled circle
+class Circle {
+  constructor(x, y, radius, color, velocity = { x: 0, y: 0 }) {
     this.x = x;
     this.y = y;
     this.radius = radius;
@@ -97,57 +105,50 @@ class Weapon {
 
   draw() {
     context.beginPath();
-    context.arc(
-      this.x,
-      this.y,
-      this.radius,
-      (Math.PI / 180) * 0,
-      (Math.PI / 180) * 360,
-      false
-    );
+    context.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
     context.fillStyle = this.color;
     context.fill();
   }
 
   update() {
+    this.x += this.velocity.x;
+    this.y += this.velocity.y;
     this.draw();
-    (this.x += this.velocity.x), (this.y += this.velocity.y);
+  }
+
+  // Circle vs circle collision (squared distance avoids a sqrt per check)
+  collidesWith(other) {
+    const dx = this.x - other.x;
+    const dy = this.y - other.y;
+    const minDist = this.radius + other.radius;
+    return dx * dx + dy * dy < minDist * minDist;
+  }
+
+  isOffScreen() {
+    return (
+      this.x + this.radius < 0 ||
+      this.x - this.radius > canvas.width ||
+      this.y + this.radius < 0 ||
+      this.y - this.radius > canvas.height
+    );
   }
 }
 
-// Creating Enemy Class
-class Enemy {
-  constructor(x, y, radius, color, velocity) {
-    this.x = x;
-    this.y = y;
-    this.radius = radius;
-    this.color = color;
-    this.velocity = velocity;
-  }
-
+class Player extends Circle {
   draw() {
-    context.beginPath();
-    context.arc(
-      this.x,
-      this.y,
-      this.radius,
-      (Math.PI / 180) * 0,
-      (Math.PI / 180) * 360,
-      false
-    );
-    context.fillStyle = this.color;
-    context.fill();
-  }
-
-  update() {
-    this.draw();
-    (this.x += this.velocity.x), (this.y += this.velocity.y);
+    // Follow center in case the window was resized
+    this.x = playerPosition.x;
+    this.y = playerPosition.y;
+    super.draw();
   }
 }
+
+class Weapon extends Circle {}
+
+class Enemy extends Circle {}
 
 // -----------------------------------------Main Logic Start here--------------------------------------------
 
-// Creating Player Object, Weapons Array, Enemies Array, Etc Array
 const prabh = new Player(playerPosition.x, playerPosition.y, 15, "white");
 
 const weapons = [];
@@ -155,86 +156,142 @@ const enemies = [];
 
 // -------------------------------Function To Spawn Enemy At Random Location-----------------------------
 const spawnEnemy = () => {
-  // generating random for enemy
-  const enemySize = Math.random() * (40 - 5) + 5; // between 40 and 5
+  const enemySize = Math.random() * (40 - 5) + 5; // between 5 and 40
 
-  // generating random color for enemy
-  const enemyColor = `rgb(${Math.random() * 250},${Math.random() * 250},${
-    Math.random() * 250
-  })`;
+  const enemyColor = `hsl(${Math.random() * 360}, 60%, 55%)`;
 
-  // random is Enemy Spawn position
+  // Spawn just outside one of the four screen edges
   let random;
-
-  // Making enemy location randombut but only from outside of screen
   if (Math.random() < 0.5) {
-    // Making X equal to very left off of the screen or very right off of the screen and setting Y to any where vertically
     random = {
       x: Math.random() < 0.5 ? canvas.width + enemySize : 0 - enemySize,
       y: Math.random() * canvas.height,
     };
   } else {
-    // Making Y equal to very up off of the screen or very down off of the screen and setting X to any where horizontally
     random = {
       x: Math.random() * canvas.width,
       y: Math.random() < 0.5 ? canvas.height + enemySize : 0 - enemySize,
     };
   }
 
-  // Finding Angle between center (means Player Position) and enemy position
+  // Head straight for the player
   const myAngle = Math.atan2(
     playerPosition.y - random.y,
     playerPosition.x - random.x
   );
-
-  // Making velocity or speed of enemy by multipling chosen difficulty to radian
   const velocity = {
     x: Math.cos(myAngle) * difficulty,
     y: Math.sin(myAngle) * difficulty,
   };
 
-  // Adding enemy to enemies array
   enemies.push(new Enemy(random.x, random.y, enemySize, enemyColor, velocity));
 };
 
-// ------------------------------------------------Creating Animation Function ---------------------------------------
-function animaton() {
-  // Making Recursion
-  requestAnimationFrame(animaton);
+const updateScore = () => {
+  scoreBoard.textContent = `Score : ${score}`;
+};
 
-  // Clearing canvas on each frame
+const gameOver = () => {
+  cancelAnimationFrame(animationId);
+  clearInterval(spawnTimer);
+  spawnTimer = null;
+  sounds.gameOver();
+
+  const gameOverBanner = document.createElement("div");
+  gameOverBanner.className = "gameover";
+  gameOverBanner.innerHTML = `<div>Game Over</div><div>Score : ${score}</div><button>Play Again</button>`;
+  gameOverBanner
+    .querySelector("button")
+    .addEventListener("click", () => location.reload());
+  document.body.appendChild(gameOverBanner);
+};
+
+// ------------------------------------------------Creating Animation Function ---------------------------------------
+function animation() {
+  animationId = requestAnimationFrame(animation);
+
   context.clearRect(0, 0, canvas.width, canvas.height);
 
-  // Drawing Player
   prabh.draw();
 
-  //   Generating Bullets
-  weapons.forEach((weapon) => {
+  // Move bullets and drop the ones that left the screen
+  for (let i = weapons.length - 1; i >= 0; i--) {
+    const weapon = weapons[i];
     weapon.update();
-  });
+    if (weapon.isOffScreen()) weapons.splice(i, 1);
+  }
 
-  //  Generating enemies
-  enemies.forEach((enemy) => {
+  for (let i = enemies.length - 1; i >= 0; i--) {
+    const enemy = enemies[i];
     enemy.update();
-  });
+
+    // Enemy reached the player
+    if (enemy.collidesWith(prabh)) {
+      gameOver();
+      return;
+    }
+
+    // Enemy hit by a bullet
+    for (let j = weapons.length - 1; j >= 0; j--) {
+      if (enemy.collidesWith(weapons[j])) {
+        weapons.splice(j, 1);
+
+        // Big enemies shrink first, small ones are destroyed
+        if (enemy.radius > 18) {
+          enemy.radius -= 10;
+          score += 10;
+          sounds.hit();
+        } else {
+          enemies.splice(i, 1);
+          score += 25;
+          sounds.destroy();
+        }
+        updateScore();
+        break;
+      }
+    }
+  }
 }
+
 // --------------------------------------Adding Event Listeners----------------------------------
 
-// event Listener for Light Weapon aka left click
+// Difficulty form (submit also covers pressing Enter)
+form.addEventListener("submit", (e) => {
+  e.preventDefault();
+  initAudio();
+
+  form.style.display = "none";
+  scoreBoard.style.display = "block";
+
+  const userValue = document.getElementById("difficulty").value;
+  const settings = DIFFICULTIES[userValue] || DIFFICULTIES.Easy;
+  difficulty = settings.speed;
+
+  clearInterval(spawnTimer);
+  spawnTimer = setInterval(spawnEnemy, settings.spawnRate);
+  animation();
+});
+
+// Light weapon aka left click
 canvas.addEventListener("click", (e) => {
-  // finding angle between player position(center) and click co-ordinates
+  if (!spawnTimer) return; // game hasn't started
+
+  // Convert the click from page coordinates to canvas coordinates
+  const rect = canvas.getBoundingClientRect();
+  const clickX = (e.clientX - rect.left) * (canvas.width / rect.width);
+  const clickY = (e.clientY - rect.top) * (canvas.height / rect.height);
+
   const myAngle = Math.atan2(
-    e.clientY - playerPosition.y,
-    e.clientX - playerPosition.x
+    clickY - playerPosition.y,
+    clickX - playerPosition.x
   );
+  const velocity = {
+    x: Math.cos(myAngle) * WEAPON_SPEED,
+    y: Math.sin(myAngle) * WEAPON_SPEED,
+  };
 
-  // Making const speed for light weapon
-  const velocity = { x: Math.cos(myAngle) * 2, y: Math.sin(myAngle) * 2 };
-
-  // Adding light weapon in weapons array
   weapons.push(
     new Weapon(playerPosition.x, playerPosition.y, 6, "white", velocity)
   );
+  sounds.shoot();
 });
-
-animaton();
